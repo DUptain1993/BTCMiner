@@ -27,8 +27,13 @@ import threading
 import traceback
 import hashlib
 import queue
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+    HAS_TKINTER = True
+except ImportError:
+    HAS_TKINTER = False
+    tk = None
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import deque, defaultdict
@@ -201,7 +206,7 @@ CHAIN_CONFIG = {
         "wif_prefix":     None,
         "api_endpoints": [
             {"name": "etherscan", "url": "https://api.etherscan.io/api?module=account&action=balance&address={address}&tag=latest", "parser": "etherscan", "rate_limit_ms": 250},
-            {"name": "blockcypher_eth", "url": "https://api.blockcypher.com/v1/eth/main/addrs/{address}/balance", "parser": "blockcypher", "rate_limit_ms": 300},
+            {"name": "blockcypher_eth", "url": "https://api.blockcypher.com/v1/eth/main/addrs/{address}/balance", "parser": "blockcypher_eth", "rate_limit_ms": 300},
             {"name": "ethplorer", "url": "https://api.ethplorer.io/getAddressInfo/{address}", "parser": "ethplorer", "rate_limit_ms": 500},
         ],
     },
@@ -451,10 +456,106 @@ class AddressGenerator:
             return AddressGenerator._ripemd160_fallback(data)
 
     @staticmethod
-    def _ripemd160_fallback(data: bytes) -> bytes:
-        h1 = hashlib.sha256(data).digest()
-        h2 = hashlib.sha256(h1).digest()
-        return h2[:20]
+    def _ripemd160_fallback(message: bytes) -> bytes:
+        h0 = 0x67452301
+        h1 = 0xefcdab89
+        h2 = 0x98badcfe
+        h3 = 0x10325476
+        h4 = 0xc3d2e1f0
+
+        def f(x, y, z): return x ^ y ^ z
+        def g(x, y, z): return (x & y) | (~x & z)
+        def h(x, y, z): return (x | ~y) ^ z
+        def i(x, y, z): return (x & z) | (y & ~z)
+        def j(x, y, z): return x ^ (y | ~z)
+
+        KL = [0x00000000, 0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xa953fd4e]
+        KR = [0x50a28be6, 0x5c4dd124, 0x6d703ef3, 0x7a6d76e9, 0x00000000]
+
+        rL = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,
+            3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12,
+            1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
+            4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13
+        ]
+        rR = [
+            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12,
+            6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2,
+            15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13,
+            8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
+            12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11
+        ]
+
+        sL = [
+            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8,
+            7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12,
+            11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5,
+            11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
+            9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6
+        ]
+        sR = [
+            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6,
+            9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11,
+            9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5,
+            15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
+            8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11
+        ]
+
+        import struct
+        bit_len = len(message) * 8
+        message += b'\x80'
+        while (len(message) + 8) % 64 != 0:
+            message += b'\x00'
+        message += struct.pack('<Q', bit_len)
+
+        for offset in range(0, len(message), 64):
+            block = message[offset:offset+64]
+            X = list(struct.unpack('<16I', block))
+
+            AL, BL, CL, DL, EL = h0, h1, h2, h3, h4
+            AR, BR, CR, DR, ER = h0, h1, h2, h3, h4
+
+            for j_step in range(80):
+                if j_step < 16:
+                    T = (AL + f(BL, CL, DL) + X[rL[j_step]] + KL[0]) & 0xffffffff
+                elif j_step < 32:
+                    T = (AL + g(BL, CL, DL) + X[rL[j_step]] + KL[1]) & 0xffffffff
+                elif j_step < 48:
+                    T = (AL + h(BL, CL, DL) + X[rL[j_step]] + KL[2]) & 0xffffffff
+                elif j_step < 64:
+                    T = (AL + i(BL, CL, DL) + X[rL[j_step]] + KL[3]) & 0xffffffff
+                else:
+                    T = (AL + j(BL, CL, DL) + X[rL[j_step]] + KL[4]) & 0xffffffff
+                shift = sL[j_step]
+                T = ((T << shift) | (T >> (32 - shift))) & 0xffffffff
+                T = (T + EL) & 0xffffffff
+                AL, BL, CL, DL, EL = EL, T, BL, ((CL << 10) | (CL >> 22)) & 0xffffffff, DL
+
+                if j_step < 16:
+                    T = (AR + j(BR, CR, DR) + X[rR[j_step]] + KR[0]) & 0xffffffff
+                elif j_step < 32:
+                    T = (AR + i(BR, CR, DR) + X[rR[j_step]] + KR[1]) & 0xffffffff
+                elif j_step < 48:
+                    T = (AR + h(BR, CR, DR) + X[rR[j_step]] + KR[2]) & 0xffffffff
+                elif j_step < 64:
+                    T = (AR + g(BR, CR, DR) + X[rR[j_step]] + KR[3]) & 0xffffffff
+                else:
+                    T = (AR + f(BR, CR, DR) + X[rR[j_step]] + KR[4]) & 0xffffffff
+                shift = sR[j_step]
+                T = ((T << shift) | (T >> (32 - shift))) & 0xffffffff
+                T = (T + ER) & 0xffffffff
+                AR, BR, CR, DR, ER = ER, T, BR, ((CR << 10) | (CR >> 22)) & 0xffffffff, DR
+
+            h0, h1, h2, h3, h4 = (
+                (h1 + CL + DR) & 0xffffffff,
+                (h2 + DL + ER) & 0xffffffff,
+                (h3 + EL + AR) & 0xffffffff,
+                (h4 + AL + BR) & 0xffffffff,
+                (h0 + BL + CR) & 0xffffffff
+            )
+
+        return struct.pack('<5I', h0, h1, h2, h3, h4)
 
     @staticmethod
     def hash160(data: bytes) -> bytes:
@@ -574,7 +675,7 @@ class AddressGenerator:
             decoded = cls.bech32_decode(address)
             if decoded:
                 witness_version, witness_program = decoded
-                op = 0x50 + witness_version
+                op = 0x00 if witness_version == 0 else 0x50 + witness_version
                 return bytes([op, len(witness_program)]) + witness_program
 
         try:
@@ -615,7 +716,79 @@ class AddressGenerator:
                 k.update(data)
                 return k.digest()
             except ImportError:
-                return hashlib.sha256(data).digest()
+                return AddressGenerator._keccak256_pure(data)
+
+    @staticmethod
+    def _keccak256_pure(data: bytes) -> bytes:
+        state = [0] * 25
+
+        RC = [
+            0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+            0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+            0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+            0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+            0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+            0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008
+        ]
+
+        r = [
+            0,   1,  62,  28,  27,
+           36,  44,   6,  55,  20,
+            3,  10,  43,  25,  39,
+           41,  45,  15,  21,   8,
+           18,   2,  61,  56,  14
+        ]
+
+        rate = 136
+        padded = bytearray(data)
+        padded.append(0x01)
+        while len(padded) % rate != (rate - 1):
+            padded.append(0x00)
+        padded.append(0x80)
+
+        for block_idx in range(0, len(padded), rate):
+            block = padded[block_idx:block_idx+rate]
+            for i in range(17):
+                val = int.from_bytes(block[i*8:(i+1)*8], 'little')
+                state[i] ^= val
+
+            for round_idx in range(24):
+                C = [0] * 5
+                for x in range(5):
+                    C[x] = state[x] ^ state[x+5] ^ state[x+10] ^ state[x+15] ^ state[x+20]
+                D = [0] * 5
+                for x in range(5):
+                    D[x] = C[(x-1)%5] ^ (((C[(x+1)%5] << 1) | (C[(x+1)%5] >> 63)) & 0xffffffffffffffff)
+                for i in range(25):
+                    state[i] ^= D[i % 5]
+
+                next_state = [0] * 25
+                for x in range(5):
+                    for y in range(5):
+                        idx = x + 5 * y
+                        shift = r[idx]
+                        val = state[idx]
+                        rotated = ((val << shift) | (val >> (64 - shift))) & 0xffffffffffffffff
+                        next_x = y
+                        next_y = (2 * x + 3 * y) % 5
+                        next_state[next_x + 5 * next_y] = rotated
+                state = next_state
+
+                next_state = list(state)
+                for y in range(5):
+                    for x in range(5):
+                        idx = x + 5 * y
+                        idx_x1 = ((x + 1) % 5) + 5 * y
+                        idx_x2 = ((x + 2) % 5) + 5 * y
+                        next_state[idx] = state[idx] ^ ((~state[idx_x1]) & state[idx_x2])
+                state = next_state
+
+                state[0] ^= RC[round_idx]
+
+        out = bytearray()
+        for i in range(4):
+            out.extend(state[i].to_bytes(8, 'little'))
+        return bytes(out)
 
     @classmethod
     def btc_legacy(cls, pubkey: bytes) -> str:
@@ -624,7 +797,7 @@ class AddressGenerator:
     @classmethod
     def btc_segwit(cls, pubkey: bytes) -> str:
         pubkey_hash = cls.hash160(pubkey)
-        redeem_script = b'\x00' + pubkey_hash
+        redeem_script = b'\x00\x14' + pubkey_hash
         script_hash = cls.hash160(redeem_script)
         return cls.base58check_encode(CHAIN_CONFIG["BTC"]["p2sh_version"] + script_hash)
 
@@ -639,7 +812,7 @@ class AddressGenerator:
     @classmethod
     def ltc_segwit(cls, pubkey: bytes) -> str:
         pubkey_hash = cls.hash160(pubkey)
-        redeem_script = b'\x00' + pubkey_hash
+        redeem_script = b'\x00\x14' + pubkey_hash
         script_hash = cls.hash160(redeem_script)
         return cls.base58check_encode(CHAIN_CONFIG["LTC"]["p2sh_version"] + script_hash)
 
@@ -1138,6 +1311,11 @@ class BlockchainChecker:
         rec = data.get("total_received", 0)
         return {"balance": bal, "balance_coin": bal/1e8, "received": rec, "received_coin": rec/1e8, "has_activity": rec > 0 or bal > 0}
 
+    def _parse_blockcypher_eth(self, data, addr): 
+        bal = data.get("balance", 0)
+        rec = data.get("total_received", 0)
+        return {"balance": bal, "balance_coin": bal/1e18, "received": rec, "received_coin": rec/1e18, "has_activity": rec > 0 or bal > 0}
+
     def _parse_mempool_space(self, data, addr):
         chain_stats = data.get("chain_stats", {})
         mempool_stats = data.get("mempool_stats", {})
@@ -1161,6 +1339,7 @@ class BlockchainChecker:
 
     PARSERS = {
         "blockchain_info": _parse_blockchain_info, "blockcypher": _parse_blockcypher,
+        "blockcypher_eth": _parse_blockcypher_eth,
         "mempool_space": _parse_mempool_space, "etherscan": _parse_etherscan,
         "ethplorer": _parse_ethplorer, "ltc_explorer": _parse_ltc_explorer
     }
@@ -1454,7 +1633,7 @@ def check_single_wallet(mnemonic: str, chains: List[str], address_types: List[st
 # ─── GUI Interface ───────────────────────────────────────────────────────────
 
 class WalletHunterGUI:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: 'tk.Tk'):
         self.root = root
         self.root.title("⚡ Multi-Chain Hunter")
         self.root.geometry("900x750")
@@ -1770,7 +1949,8 @@ def record_result(address, balance, all_time_balance, seed, private_key, entropy
 
 def cli_worker_loop(chain, addr_type, strength, language, passphrase, stop_event):
     generator = WalletGenerator()
-    checker = BlockchainChecker(ProxyManager())
+    proxy_file = "proxy.txt" if os.path.exists("proxy.txt") else None
+    checker = BlockchainChecker(ProxyManager(proxy_file))
     
     while not stop_event.is_set():
         try:
@@ -1820,6 +2000,69 @@ def cli_worker_loop(chain, addr_type, strength, language, passphrase, stop_event
         except Exception:
             pass
 
+def cli_checker_worker_loop(chain, addr_type, passphrase, q, stop_event):
+    generator = WalletGenerator()
+    proxy_file = "proxy.txt" if os.path.exists("proxy.txt") else None
+    checker = BlockchainChecker(ProxyManager(proxy_file))
+    
+    while not stop_event.is_set():
+        try:
+            mnemonic_str = q.get_nowait()
+        except queue.Empty:
+            break
+            
+        try:
+            mnemonic = mnemonic_str.strip().split()
+            if len(mnemonic) not in (12, 15, 18, 21, 24):
+                safe_print(f"{Fore.RED}[x] Invalid mnemonic format: '{mnemonic_str}'{Fore.RESET}")
+                q.task_done()
+                continue
+                
+            seed = BIP39Wordlist.mnemonic_to_seed(mnemonic, passphrase)
+            master_key, master_chain_code = BIP32Derivation.master_key_from_seed(seed)
+            
+            config = CHAIN_CONFIG.get(chain)
+            path = config["derivation_paths"].get(addr_type)
+            priv_key, _ = BIP32Derivation.derive_path(master_key, master_chain_code, path)
+            pubkey = BIP32Derivation.private_to_public_key(priv_key, compressed=True)
+            
+            address = generator._get_address(chain, addr_type, pubkey)
+            wif = AddressGenerator.private_to_wif(priv_key, chain)
+            
+            res = checker.check_address(address, chain)
+            if res:
+                balance_coin = res.get("balance_coin", 0.0)
+                received_coin = res.get("received_coin", 0.0)
+                has_activity = res.get("has_activity", False)
+            else:
+                balance_coin = 0.0
+                received_coin = 0.0
+                has_activity = False
+                
+            now_time = datetime.now()
+            current = now_time.strftime("%H:%M:%S")
+            
+            balance_str = f"{balance_coin:.8f}"
+            rec_str = f"{received_coin:.8f}"
+            priv_hex = priv_key.hex()
+            
+            print_line = (
+                f"{Fore.LIGHTBLACK_EX}[{current}]{Fore.RESET} "
+                f"{Fore.YELLOW}{address}{Fore.RESET} {Fore.LIGHTBLACK_EX}|{Fore.RESET} "
+                f"{Fore.LIGHTGREEN_EX}BAL: {balance_str} {chain}{Fore.RESET} {Fore.LIGHTBLACK_EX}|{Fore.RESET} "
+                f"{Fore.LIGHTWHITE_EX}SEED: {mnemonic_str}{Fore.RESET} {Fore.LIGHTBLACK_EX}|{Fore.RESET} "
+                f"{Fore.LIGHTRED_EX}PRIV: {priv_hex}{Fore.RESET}"
+            )
+            safe_print(print_line)
+            
+            success = (balance_coin > 0.0) or has_activity
+            record_result(address, balance_str, rec_str, mnemonic_str, priv_hex, "", wif, success)
+            
+        except Exception:
+            pass
+        finally:
+            q.task_done()
+
 def map_address_type(addr_type_str: str) -> str:
     addr_type_str = addr_type_str.lower()
     if addr_type_str == "p2pkh":
@@ -1835,12 +2078,31 @@ def run_cli_hunter(mode_name: str):
     print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Saving failed seeds on >> {Fore.LIGHTYELLOW_EX}{config_failed}{Fore.RESET}")
     print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Saving successful seeds on >> {Fore.LIGHTYELLOW_EX}{config_success}{Fore.RESET}")
     
-    if mode_name == "checker":
-        print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Generating seeds from BIP39 wordlist...{Fore.RESET}")
+    q = queue.Queue()
+    mnemonics_count = 0
     
+    if mode_name == "checker":
+        print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Checking from file >> {Fore.LIGHTYELLOW_EX}{c_config_file}{Fore.RESET}")
+        if not os.path.exists(c_config_file):
+            print(f"{Fore.RED}[x] Error: file '{c_config_file}' not found! Please create it and add mnemonics to check.{Fore.RESET}")
+            sys.exit(1)
+        with open(c_config_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    q.put(line)
+                    mnemonics_count += 1
+        if mnemonics_count == 0:
+            print(f"{Fore.RED}[x] Error: '{c_config_file}' contains no mnemonics!{Fore.RESET}")
+            sys.exit(1)
+        print(f"{Fore.GREEN}[*] Loaded {mnemonics_count} mnemonics from '{c_config_file}' for checking.{Fore.RESET}")
+    else:
+        print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Bruteforcing random seeds...{Fore.RESET}")
+        
     print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Type of addresses >> {Fore.LIGHTYELLOW_EX}{config_address}{Fore.RESET}")
-    print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Language >> {Fore.LIGHTYELLOW_EX}{b_config_language}{Fore.RESET}")
-    print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Strength >> {Fore.LIGHTYELLOW_EX}{b_config_strenght}{Fore.RESET}")
+    if mode_name != "checker":
+        print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Language >> {Fore.LIGHTYELLOW_EX}{b_config_language}{Fore.RESET}")
+        print(f"{Fore.YELLOW}[!]{Fore.RESET} {Fore.LIGHTWHITE_EX}Strength >> {Fore.LIGHTYELLOW_EX}{b_config_strenght}{Fore.RESET}")
     
     # Prompt for threads count
     try:
@@ -1856,25 +2118,46 @@ def run_cli_hunter(mode_name: str):
     stop_event = threading.Event()
     threads = []
     
-    for _ in range(num_threads):
-        t = threading.Thread(
-            target=cli_worker_loop,
-            args=("BTC", mapped_addr, b_config_strenght, b_config_language, b_config_passphere, stop_event),
-            daemon=True
-        )
-        t.start()
-        threads.append(t)
-        
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}[!] Stopping threads...{Fore.RESET}")
-        stop_event.set()
-        for t in threads:
-            t.join(timeout=1.0)
-        print(f"{Fore.GREEN}[+] Stopped.{Fore.RESET}")
-        sys.exit(0)
+    if mode_name == "checker":
+        for _ in range(min(num_threads, mnemonics_count)):
+            t = threading.Thread(
+                target=cli_checker_worker_loop,
+                args=("BTC", mapped_addr, b_config_passphere, q, stop_event),
+                daemon=True
+            )
+            t.start()
+            threads.append(t)
+            
+        try:
+            while not q.empty() and not stop_event.is_set():
+                time.sleep(0.5)
+            q.join()
+            print(f"\n{Fore.GREEN}[+] Finished checking all loaded mnemonics from '{c_config_file}'.{Fore.RESET}")
+            sys.exit(0)
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}[!] Stopping threads...{Fore.RESET}")
+            stop_event.set()
+            sys.exit(0)
+    else:
+        for _ in range(num_threads):
+            t = threading.Thread(
+                target=cli_worker_loop,
+                args=("BTC", mapped_addr, b_config_strenght, b_config_language, b_config_passphere, stop_event),
+                daemon=True
+            )
+            t.start()
+            threads.append(t)
+            
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}[!] Stopping threads...{Fore.RESET}")
+            stop_event.set()
+            for t in threads:
+                t.join(timeout=1.0)
+            print(f"{Fore.GREEN}[+] Stopped.{Fore.RESET}")
+            sys.exit(0)
 
 # ─── Main Switchboard ────────────────────────────────────────────────────────
 
@@ -1885,7 +2168,16 @@ def main():
     args = parser.parse_args()
 
     if args.gui:
-        run_gui()
+        try:
+            run_gui()
+        except ImportError as e:
+            print(f"\n{Fore.RED}[x] Error: {e}{Fore.RESET}")
+            print("To run the GUI, please install Tkinter using your package manager:")
+            print("  - Termux:         pkg install python-tkinter")
+            print("  - Debian/Ubuntu:  sudo apt install python3-tk")
+            print("  - CentOS/RHEL:    sudo yum install python3-tkinter")
+            print("  - macOS:          brew install python-tk")
+            sys.exit(1)
         return
     elif args.cli:
         run_cli()
@@ -1902,6 +2194,8 @@ def main():
     run_cli()
 
 def run_gui():
+    if not HAS_TKINTER:
+        raise ImportError("Tkinter is not installed on this system.")
     root = tk.Tk()
     app = WalletHunterGUI(root)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
@@ -1920,7 +2214,16 @@ def run_cli():
     choice = input(f"{Fore.YELLOW}[?]{Fore.RESET} {Fore.LIGHTWHITE_EX}Make a choice between Checker, Bruteforcer, and GUI [C] - [B] - [G] > {Fore.RESET}").strip().lower()
     
     if choice == "g":
-        run_gui()
+        try:
+            run_gui()
+        except ImportError as e:
+            print(f"\n{Fore.RED}[x] Error: {e}{Fore.RESET}")
+            print("To run the GUI, please install Tkinter using your package manager:")
+            print("  - Termux:         pkg install python-tkinter")
+            print("  - Debian/Ubuntu:  sudo apt install python3-tk")
+            print("  - CentOS/RHEL:    sudo yum install python3-tkinter")
+            print("  - macOS:          brew install python-tk")
+            sys.exit(1)
     elif choice == "b":
         run_cli_hunter("bruteforcer")
     elif choice == "c":
